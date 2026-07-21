@@ -58,7 +58,7 @@ def parse_quantity(name: str) -> str:
         return ""
 
     if "пара" in text:
-        return "пара"
+        return "2 шт"
 
     qty_match = re.search(
         r"\b(\d+)\s*(?:шт\.?|штук|pcs|pieces)\b",
@@ -74,7 +74,7 @@ def parse_quantity(name: str) -> str:
             return f"{qty_match.group(1)} шт"
         return "комплект"
 
-    return ""
+    return "Не указано"
 
 
 def parse_brand(name: str, offer_id: str = "") -> str:
@@ -100,26 +100,72 @@ def parse_brand(name: str, offer_id: str = "") -> str:
     return ""
 
 
-def extract_oem(name: str, offer_id: str = "") -> str:
-    normalized_offer = normalize_offer_id(offer_id)
-    if normalized_offer:
-        return normalized_offer
-
+def extract_oem(name: str) -> tuple[str, str]:
     text = normalize_spaces(name)
     if not text:
+        return "", text
+
+    match = re.search(r"\bOEM\s+(\S+)", text, flags=re.IGNORECASE)
+    if not match:
+        return "", text
+
+    oem = match.group(1)
+
+    cleaned_name = re.sub(
+        r"\bOEM\s+\S+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    cleaned_name = normalize_spaces(cleaned_name)
+    return oem, cleaned_name
+
+
+def clean_name(name: str, brand: str = "", oem: str = "", quantity: str = "") -> str:
+    if not name:
         return ""
 
-    patterns = [
-        r"\b\d{4,}(?:-\d{3,})+\b",
-        r"\b[A-ZА-Я]{1,6}[- ]?\d{3,}[A-Z0-9]*\b",
-        r"\b\d{5,}\b",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return normalize_offer_id(match.group(0))
+    cleaned = normalize_spaces(name)
 
-    return ""
+    if brand:
+        cleaned = re.sub(
+            r"\b" + re.escape(brand) + r"\b",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+
+    cleaned = re.sub(r"\bOEM\s+\S+", "", cleaned, flags=re.IGNORECASE)
+
+    cleaned = re.sub(r"\b[A-Z0-9-]+\d+[A-Z0-9-]*\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b\d{4,}\b", "", cleaned)   
+
+    qty_patterns = [
+        r"\b\d+\s*шт\.?",
+        r"\b\d+\s*штук",
+        r"\bкомплект",
+        r"\bк-?т",
+        r"\bкомпл\.?",
+        r"\bнабор",
+        r"\bset",
+        r"\bkit",
+        r"\bпара",
+        r"\b2\s*шт",
+        r"\b\d+шт",
+        r"\b\d+мм",
+        r"[\(\)]",
+    ]
+    for pattern in qty_patterns:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+
+    cleaned = re.sub(r"[\s,/-]+$", "", cleaned)
+    cleaned = re.sub(r"^\s*[\s,/-]+\s*", "", cleaned)
+    cleaned = normalize_spaces(cleaned)
+
+    if cleaned and cleaned[0].islower():
+        cleaned = cleaned[0].upper() + cleaned[1:]
+
+    return cleaned
 
 
 def parse_product(row: Dict[str, str]) -> CleanRow:
@@ -127,9 +173,12 @@ def parse_product(row: Dict[str, str]) -> CleanRow:
     raw_offer = normalize_offer_id(row.get("offer_id", ""))
     name = raw_name or raw_offer
 
+    oem, name = extract_oem(name)
     brand = parse_brand(name, raw_offer)
-    oem = extract_oem(name, raw_offer)
     quantity = parse_quantity(name)
+
+    name = clean_name(name, brand, oem, quantity)
+
     price = clean_price(row.get("price", ""))
 
     stock_raw = normalize_spaces(str(row.get("stock", "")))
@@ -151,14 +200,14 @@ def dedupe_key(row: CleanRow) -> str:
         return f"oem:{row.oem}"
     if row.offer_id:
         return f"offer:{row.offer_id}"
-    return f"name:{re.sub(r'\\s+', ' ', row.name).strip().lower()}"
+    return f"name:{re.sub(r'\s+', ' ', row.name).strip().lower()}"
 
 
 def score_row(row: CleanRow) -> tuple[int, int, int, int]:
     return (
         1 if row.brand else 0,
         1 if row.oem else 0,
-        1 if row.quantity else 0,
+        1 if row.quantity and row.quantity != "Не указано" else 0,
         1 if row.price is not None else 0,
     )
 
